@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
-	"main/internal/dagger"
 	"strings"
 )
 
@@ -23,7 +21,6 @@ func New(
 	//+optional
 	packages string,
 ) *TrustacksGolangApi {
-	fmt.Println(source)
 	return &TrustacksGolangApi{
 		Source:   source,
 		Packages: packages,
@@ -61,7 +58,7 @@ func (m *TrustacksGolangApi) GoBuild() *Directory {
 	return dag.
 		Go().
 		FromVersion(golangVersion).
-		Build(m.Source, dagger.GoBuildOpts{
+		Build(m.Source, GoBuildOpts{
 			Packages: strings.Split(m.Packages, ","),
 		})
 }
