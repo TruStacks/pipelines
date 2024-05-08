@@ -7,8 +7,9 @@ import (
 )
 
 type TrustacksGolangApi struct {
-	Source   *Directory
-	Packages string
+	Source     *Directory
+	SonarToken *Secret
+	Packages   string
 }
 
 const golangVersion = "1.20"
@@ -16,9 +17,13 @@ const golangVersion = "1.20"
 func New(
 	// application source path
 	source *Directory,
+
+	// sonarqube token
+	sonarToken *Secret,
 ) *TrustacksGolangApi {
 	return &TrustacksGolangApi{
-		Source: source,
+		Source:     source,
+		SonarToken: sonarToken,
 	}
 }
 
@@ -27,7 +32,12 @@ func (m *TrustacksGolangApi) Build() error {
 	if _, err := m.GolangCilint(ctx).Sync(ctx); err != nil {
 		return err
 	}
-	if _, err := m.GoTest(ctx).Sync(ctx); err != nil {
+	testCtr, err := m.GoTest(ctx).Sync(ctx)
+	if err != nil {
+		return err
+	}
+	m.Source = m.Source.WithFile("coverage.out", testCtr.File("/src/coverage.out"))
+	if _, err := m.SonarAnalyze(ctx); err != nil {
 		return err
 	}
 	build, err := m.GoBuild(ctx)
@@ -50,7 +60,13 @@ func (m *TrustacksGolangApi) GoTest(ctx context.Context) *Container {
 	return dag.
 		Go().
 		FromVersion(golangVersion).
-		Test(m.Source, GoTestOpts{Verbose: true, TestFlags: []string{"-short"}})
+		Test(m.Source, GoTestOpts{
+			Verbose: true,
+			TestFlags: []string{
+				"-short",
+				"-coverprofile=coverage.out",
+			},
+		})
 }
 
 func (m *TrustacksGolangApi) GoBuild(ctx context.Context) (*Directory, error) {
@@ -70,4 +86,10 @@ func (m *TrustacksGolangApi) GoBuild(ctx context.Context) (*Directory, error) {
 		Build(m.Source, GoBuildOpts{
 			Packages: packages,
 		}), nil
+}
+
+func (m *TrustacksGolangApi) SonarAnalyze(ctx context.Context) (string, error) {
+	return dag.
+		Sonar().
+		Analyze(ctx, m.Source, m.SonarToken)
 }

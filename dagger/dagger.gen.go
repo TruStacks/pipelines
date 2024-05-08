@@ -6,11 +6,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"main/internal/dagger"
+	"log/slog"
 	"os"
+
+	"main/internal/dagger"
+	"main/internal/telemetry"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var dag = dagger.Connect()
+
+func Tracer() trace.Tracer {
+	return otel.Tracer("dagger.io/sdk.go")
+}
+
+// used for local MarshalJSON implementations
+var marshalCtx = context.Background()
+
+// called by main()
+func setMarshalContext(ctx context.Context) {
+	marshalCtx = ctx
+	dagger.SetMarshalContext(ctx)
+}
 
 type DaggerObject = dagger.DaggerObject
 
@@ -94,6 +116,9 @@ type ModuleID = dagger.ModuleID
 // The `ModuleSourceID` scalar type represents an identifier for an object of type ModuleSource.
 type ModuleSourceID = dagger.ModuleSourceID
 
+// The `ModuleSourceViewID` scalar type represents an identifier for an object of type ModuleSourceView.
+type ModuleSourceViewID = dagger.ModuleSourceViewID
+
 // The `ObjectTypeDefID` scalar type represents an identifier for an object of type ObjectTypeDef.
 type ObjectTypeDefID = dagger.ObjectTypeDefID
 
@@ -113,6 +138,9 @@ type ServiceID = dagger.ServiceID
 
 // The `SocketID` scalar type represents an identifier for an object of type Socket.
 type SocketID = dagger.SocketID
+
+// The `SonarID` scalar type represents an identifier for an object of type Sonar.
+type SonarID = dagger.SonarID
 
 // The `TerminalID` scalar type represents an identifier for an object of type Terminal.
 type TerminalID = dagger.TerminalID
@@ -162,6 +190,9 @@ type ContainerPublishOpts = dagger.ContainerPublishOpts
 
 // ContainerTerminalOpts contains options for Container.Terminal
 type ContainerTerminalOpts = dagger.ContainerTerminalOpts
+
+// ContainerWithDefaultTerminalCmdOpts contains options for Container.WithDefaultTerminalCmd
+type ContainerWithDefaultTerminalCmdOpts = dagger.ContainerWithDefaultTerminalCmdOpts
 
 // ContainerWithDirectoryOpts contains options for Container.WithDirectory
 type ContainerWithDirectoryOpts = dagger.ContainerWithDirectoryOpts
@@ -227,6 +258,9 @@ type DirectoryDockerBuildOpts = dagger.DirectoryDockerBuildOpts
 
 // DirectoryEntriesOpts contains options for Directory.Entries
 type DirectoryEntriesOpts = dagger.DirectoryEntriesOpts
+
+// DirectoryExportOpts contains options for Directory.Export
+type DirectoryExportOpts = dagger.DirectoryExportOpts
 
 // DirectoryPipelineOpts contains options for Directory.Pipeline
 type DirectoryPipelineOpts = dagger.DirectoryPipelineOpts
@@ -300,6 +334,8 @@ type GitRefTreeOpts = dagger.GitRefTreeOpts
 // A git repository.
 type GitRepository = dagger.GitRepository
 
+type WithGitRepositoryFunc = dagger.WithGitRepositoryFunc
+
 // Go provides a set of high-level interfaces for building and testing Go code.
 type Go = dagger.Go
 
@@ -364,6 +400,12 @@ type ModuleSource = dagger.ModuleSource
 
 type WithModuleSourceFunc = dagger.WithModuleSourceFunc
 
+// ModuleSourceResolveDirectoryFromCallerOpts contains options for ModuleSource.ResolveDirectoryFromCaller
+type ModuleSourceResolveDirectoryFromCallerOpts = dagger.ModuleSourceResolveDirectoryFromCallerOpts
+
+// A named set of path filters that can be applied to directory arguments provided to functions.
+type ModuleSourceView = dagger.ModuleSourceView
+
 // A definition of a custom object defined in a Module.
 type ObjectTypeDef = dagger.ObjectTypeDef
 
@@ -422,6 +464,11 @@ type ServiceUpOpts = dagger.ServiceUpOpts
 
 // A Unix or TCP/IP socket that can be mounted into a container.
 type Socket = dagger.Socket
+
+type Sonar = dagger.Sonar
+
+// SonarAnalyzeOpts contains options for Sonar.Analyze
+type SonarAnalyzeOpts = dagger.SonarAnalyzeOpts
 
 // An interactive terminal that clients can connect to.
 type Terminal = dagger.Terminal
@@ -547,74 +594,116 @@ func convertSlice[I any, O any](in []I, f func(I) O) []O {
 }
 
 func (r TrustacksGolangApi) MarshalJSON() ([]byte, error) {
-	var concrete struct{}
+	var concrete struct {
+		Source     *Directory
+		SonarToken *Secret
+		Packages   string
+	}
+	concrete.Source = r.Source
+	concrete.SonarToken = r.SonarToken
+	concrete.Packages = r.Packages
 	return json.Marshal(&concrete)
 }
 
 func (r *TrustacksGolangApi) UnmarshalJSON(bs []byte) error {
-	var concrete struct{}
+	var concrete struct {
+		Source     *Directory
+		SonarToken *Secret
+		Packages   string
+	}
 	err := json.Unmarshal(bs, &concrete)
 	if err != nil {
 		return err
 	}
+	r.Source = concrete.Source
+	r.SonarToken = concrete.SonarToken
+	r.Packages = concrete.Packages
 	return nil
 }
 
 func main() {
 	ctx := context.Background()
 
+	// Direct slog to the new stderr. This is only for dev time debugging, and
+	// runtime errors/warnings.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	})))
+
+	if err := dispatch(ctx); err != nil {
+		fmt.Println(err.Error())
+		os.Exit(2)
+	}
+}
+
+func dispatch(ctx context.Context) error {
+	ctx = telemetry.InitEmbedded(ctx, resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceNameKey.String("dagger-go-sdk"),
+		// TODO version?
+	))
+	defer telemetry.Close()
+
+	ctx, span := Tracer().Start(ctx, "Go runtime",
+		trace.WithAttributes(
+			// In effect, the following two attributes hide the exec /runtime span.
+			//
+			// Replace the parent span,
+			attribute.Bool("dagger.io/ui.mask", true),
+			// and only show our children.
+			attribute.Bool("dagger.io/ui.passthrough", true),
+		))
+	defer span.End()
+
+	// A lot of the "work" actually happens when we're marshalling the return
+	// value, which entails getting object IDs, which happens in MarshalJSON,
+	// which has no ctx argument, so we use this lovely global variable.
+	setMarshalContext(ctx)
+
 	fnCall := dag.CurrentFunctionCall()
 	parentName, err := fnCall.ParentName(ctx)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("get parent name: %w", err)
 	}
 	fnName, err := fnCall.Name(ctx)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("get fn name: %w", err)
 	}
 	parentJson, err := fnCall.Parent(ctx)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("get fn parent: %w", err)
 	}
 	fnArgs, err := fnCall.InputArgs(ctx)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("get fn args: %w", err)
 	}
 
 	inputArgs := map[string][]byte{}
 	for _, fnArg := range fnArgs {
 		argName, err := fnArg.Name(ctx)
 		if err != nil {
-			fmt.Println(err.Error())
-			os.Exit(2)
+			return fmt.Errorf("get fn arg name: %w", err)
 		}
 		argValue, err := fnArg.Value(ctx)
 		if err != nil {
-			fmt.Println(err.Error())
-			os.Exit(2)
+			return fmt.Errorf("get fn arg value: %w", err)
 		}
 		inputArgs[argName] = []byte(argValue)
 	}
 
 	result, err := invoke(ctx, []byte(parentJson), parentName, fnName, inputArgs)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("invoke: %w", err)
 	}
 	resultBytes, err := json.Marshal(result)
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("marshal: %w", err)
 	}
 	_, err = fnCall.ReturnValue(ctx, JSON(resultBytes))
 	if err != nil {
-		fmt.Println(err.Error())
-		os.Exit(2)
+		return fmt.Errorf("store return value: %w", err)
 	}
+	return nil
 }
 
 func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
@@ -634,14 +723,28 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*TrustacksGolangApi).GolangCilint(&parent), nil
+			return (*TrustacksGolangApi).GolangCilint(&parent, ctx), nil
 		case "GoTest":
 			var parent TrustacksGolangApi
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*TrustacksGolangApi).GoTest(&parent), nil
+			return (*TrustacksGolangApi).GoTest(&parent, ctx), nil
+		case "GoBuild":
+			var parent TrustacksGolangApi
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			return (*TrustacksGolangApi).GoBuild(&parent, ctx)
+		case "SonarAnalyze":
+			var parent TrustacksGolangApi
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			return (*TrustacksGolangApi).SonarAnalyze(&parent, ctx)
 		case "":
 			var parent TrustacksGolangApi
 			err = json.Unmarshal(parentJSON, &parent)
@@ -655,7 +758,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg source", err))
 				}
 			}
-			return New(source), nil
+			var sonarToken *Secret
+			if inputArgs["sonarToken"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["sonarToken"]), &sonarToken)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg sonarToken", err))
+				}
+			}
+			return New(source, sonarToken), nil
 		default:
 			return nil, fmt.Errorf("unknown function %s", fnName)
 		}
@@ -672,10 +782,20 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					WithFunction(
 						dag.Function("GoTest",
 							dag.TypeDef().WithObject("Container"))).
+					WithFunction(
+						dag.Function("GoBuild",
+							dag.TypeDef().WithObject("Directory"))).
+					WithFunction(
+						dag.Function("SonarAnalyze",
+							dag.TypeDef().WithKind(StringKind))).
+					WithField("Source", dag.TypeDef().WithObject("Directory")).
+					WithField("SonarToken", dag.TypeDef().WithObject("Secret")).
+					WithField("Packages", dag.TypeDef().WithKind(StringKind)).
 					WithConstructor(
 						dag.Function("New",
 							dag.TypeDef().WithObject("TrustacksGolangApi")).
-							WithArg("source", dag.TypeDef().WithObject("Directory")))), nil
+							WithArg("source", dag.TypeDef().WithObject("Directory"), FunctionWithArgOpts{Description: "application source path"}).
+							WithArg("sonarToken", dag.TypeDef().WithObject("Secret"), FunctionWithArgOpts{Description: "sonarqube token"}))), nil
 	default:
 		return nil, fmt.Errorf("unknown object %s", parentName)
 	}

@@ -3,14 +3,18 @@
   "sdk": "go",
   "dependencies": [
     {
-      "name": "golangci-lint",
-      "source": "github.com/sagikazarmark/daggerverse/golangci-lint@bc2ccb71307797d3066a56e1e57d75205523cfad"
+      "name": "sonar",
+      "source": "github.com/cacidy-io/daggerverse/sonar@d0d9ecbd93ca925e4296f3dbaaafc4556a4c3a6e"
     },
     {
       "name": "go",
       "source": "github.com/vito/daggerverse/go@9f66a3dc5a3687c0828e2499894a51315f998b5c"
+    },
+    {
+      "name": "golangci-lint",
+      "source": "github.com/sagikazarmark/daggerverse/golangci-lint@bc2ccb71307797d3066a56e1e57d75205523cfad"
     }
   ],
   "source": "dagger",
-  "engineVersion": "v0.11.0"
+  "engineVersion": "v0.11.2"
 }
