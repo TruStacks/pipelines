@@ -12,7 +12,7 @@
     },
     {
       "name": "golangci-lint",
-      "source": "github.com/sagikazarmark/daggerverse/golangci-lint@bc2ccb71307797d3066a56e1e57d75205523cfad"
+      "source": "github.com/sagikazarmark/daggerverse/golangci-lint@v0.2.0"
     }
   ],
   "source": "dagger",
