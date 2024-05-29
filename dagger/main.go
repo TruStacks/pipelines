@@ -7,9 +7,8 @@ import (
 )
 
 type TrustacksGolangApi struct {
-	Source     *Directory
-	SonarToken *Secret
-	Packages   string
+	Source   *Directory
+	Packages string
 }
 
 const golangVersion = "1.20"
@@ -17,17 +16,16 @@ const golangVersion = "1.20"
 func New(
 	// application source path
 	source *Directory,
-
-	// sonarqube token
-	sonarToken *Secret,
 ) *TrustacksGolangApi {
 	return &TrustacksGolangApi{
-		Source:     source,
-		SonarToken: sonarToken,
+		Source: source,
 	}
 }
 
-func (m *TrustacksGolangApi) Build() error {
+func (m *TrustacksGolangApi) Build(
+	// sonarqube token
+	sonarToken *Secret,
+) error {
 	ctx := context.Background()
 	if _, err := m.GolangCilint(ctx).Sync(ctx); err != nil {
 		return err
@@ -37,7 +35,7 @@ func (m *TrustacksGolangApi) Build() error {
 		return err
 	}
 	m.Source = m.Source.WithFile("coverage.out", testCtr.File("/src/coverage.out"))
-	if _, err := m.SonarAnalyze(ctx); err != nil {
+	if _, err := m.SonarAnalyze(ctx, sonarToken); err != nil {
 		return err
 	}
 	build, err := m.GoBuild(ctx)
@@ -88,8 +86,8 @@ func (m *TrustacksGolangApi) GoBuild(ctx context.Context) (*Directory, error) {
 		}), nil
 }
 
-func (m *TrustacksGolangApi) SonarAnalyze(ctx context.Context) (string, error) {
+func (m *TrustacksGolangApi) SonarAnalyze(ctx context.Context, token *Secret) (string, error) {
 	return dag.
 		Sonar().
-		Analyze(ctx, m.Source, m.SonarToken)
+		Analyze(ctx, m.Source, token)
 }
